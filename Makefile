@@ -57,6 +57,9 @@ remove-image:
 # Full cleanup (stop container and remove image)
 full-clean: stop remove-image clean
 
+dev:
+	uvicorn main:app --reload
+
 # Help command
 help:
 	@echo "Available commands:"

@@ -1,43 +1,63 @@
-from fastapi import FastAPI
+from fastapi import FastAPI, HTTPException
+from motor.motor_asyncio import AsyncIOMotorClient
 from pydantic import BaseModel
-import numpy as np
 from typing import List
+import os
+
+# MongoDB connection URL
+MONGO_URL = "mongodb://admin:your_mongo_password@mongodb.nasfong.site:443/motor?ssl=true&authSource=admin"
 
 app = FastAPI(title="ML API", version="1.0")
 
-# Simple mock ML model (linear prediction)
-class MLModel:
-    def __init__(self):
-        self.weights = np.array([0.5, 0.3, 0.2])
-        self.bias = 0.1
-    
-    def predict(self, features: List[float]) -> float:
-        return float(np.dot(features, self.weights) + self.bias)
+# MongoDB client and database
+client = AsyncIOMotorClient(MONGO_URL)
+db = client["motor"]  # database name is "motor"
+collection = db["products"]  # collection name is "products"
 
-model = MLModel()
 
-class PredictionRequest(BaseModel):
-    features: List[float]
+# Define product model for response
+class Product(BaseModel):
+    id: str
+    name: str
+    price: float | None = None
+    description: str | None = None
 
-class PredictionResponse(BaseModel):
-    prediction: float
 
 @app.get("/")
 def root():
     return {"message": "ML API is running"}
 
-@app.get("/health")
-def health():
-    return {"status": "healthy"}
 
-@app.post("/predict", response_model=PredictionResponse)
-def predict(request: PredictionRequest):
-    if len(request.features) != 3:
-        return {"error": "Expected 3 features"}
-    
-    prediction = model.predict(request.features)
-    return {"prediction": prediction}
-
-if __name__ == "__main__":
-    import uvicorn
-    uvicorn.run(app, host="0.0.0.0", port=8000)
+@app.get("/products", response_model=List[Product])
+async def list_products():
+    """Fetch all products from MongoDB"""
+    try:
+        products_cursor = collection.find()
+        products = []
+        async for product in products_cursor:
+            try:
+                # Validate and convert price
+                price = product.get("price", 0.0)
+                if isinstance(price, str):
+                    # Try to parse string to float, skip if invalid
+                    try:
+                        price = float(price)
+                    except ValueError:
+                        print(f"Skipping product {product.get('_id')} - invalid price: {price}")
+                        continue
+                
+                products.append(
+                    Product(
+                        id=str(product["_id"]),
+                        name=product.get("name", "Unknown"),
+                        price=price,
+                        description=product.get("description", None),
+                    )
+                )
+            except Exception as e:
+                print(f"Error processing product {product.get('_id')}: {e}")
+                continue
+        
+        return products
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
