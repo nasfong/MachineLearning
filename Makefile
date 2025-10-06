@@ -58,7 +58,7 @@ remove-image:
 full-clean: stop remove-image clean
 
 dev:
-	uvicorn main:app --reload
+	 python -m uvicorn main:app --reload
 
 # Help command
 help:
