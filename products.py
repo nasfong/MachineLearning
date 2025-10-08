@@ -25,6 +25,7 @@ def to_product_out(doc) -> ProductOut:
 
 router = APIRouter(prefix="/products", tags=["products"])
 
+@router.get("", response_model=List[ProductOut])
 @router.get("/", response_model=List[ProductOut])
 async def list_products(
     limit: int = Query(50, ge=1, le=200),
@@ -40,6 +41,7 @@ async def list_products(
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Database error: {e}")
 
+@router.post("", response_model=ProductOut, status_code=201)
 @router.post("/", response_model=ProductOut, status_code=201)
 async def create_product(product: ProductIn):
     col = get_collection()
