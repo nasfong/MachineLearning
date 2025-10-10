@@ -11,6 +11,12 @@ services:
       - "8000:8000"
     environment:
       - MONGO_URL=mongodb://admin:your_mongo_password@mongodb.nasfong.site:443/motor?ssl=true&authSource=admin
+      # Remove https:// from MINIO_ENDPOINT - just use hostname:port
+      - MINIO_ENDPOINT=minio-api.nasfong.site
+      - MINIO_ACCESS_KEY=admin
+      - MINIO_SECRET_KEY=Rening007minio
+      # Set to true since you're using HTTPS endpoint
+      - MINIO_SECURE=true
     volumes:
       # Mount entire source for hot reload
       - .:/app
