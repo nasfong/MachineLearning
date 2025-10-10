@@ -279,3 +279,8 @@ For issues and questions:
 - Open an issue on GitHub
 - Check the [FastAPI documentation](https://fastapi.tiangolo.com/)
 - Check the [Docker documentation](https://docs.docker.com/)
+
+## Docker Compose with Celery and Redis
+```
+docker compose up --scale celery-worker=4
+```

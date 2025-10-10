@@ -1,24 +1,59 @@
 version: '3.8'
 
 services:
+  redis:
+    image: redis:7-alpine
+    # container_name: ml-redis   # <-- REMOVE if you might scale redis too (usually you don't)
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis-data:/data
+    restart: always
+    command: redis-server --appendonly yes
+
   fastapi-ml:
     build:
       context: .
       dockerfile: Dockerfile
-    # image: nasfong/machine-learning:latest
-    container_name: ml-api
+    # container_name: ml-api      # <-- REMOVE if you might scale API
     ports:
       - "8000:8000"
     environment:
       - MONGO_URL=mongodb://admin:your_mongo_password@mongodb.nasfong.site:443/motor?ssl=true&authSource=admin
-      # Remove https:// from MINIO_ENDPOINT - just use hostname:port
       - MINIO_ENDPOINT=minio-api.nasfong.site
       - MINIO_ACCESS_KEY=admin
       - MINIO_SECRET_KEY=Rening007minio
-      # Set to true since you're using HTTPS endpoint
       - MINIO_SECURE=true
+      - REDIS_URL=redis://redis:6379/0
     volumes:
-      # Mount entire source for hot reload
       - .:/app
+    depends_on:
+      - redis
     restart: always
     command: uvicorn main:app --host 0.0.0.0 --port 8000 --reload
+
+  celery-worker:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    # container_name: ml-worker   # <-- REMOVE to allow scaling
+    environment:
+      - MONGO_URL=mongodb://admin:your_mongo_password@mongodb.nasfong.site:443/motor?ssl=true&authSource=admin
+      - MINIO_ENDPOINT=minio-api.nasfong.site
+      - MINIO_ACCESS_KEY=admin
+      - MINIO_SECRET_KEY=Rening007minio
+      - MINIO_SECURE=true
+      - REDIS_URL=redis://redis:6379/0
+    volumes:
+      - .:/app
+    depends_on:
+      - redis
+    restart: always
+    command: celery -A celery_worker worker --loglevel=info --concurrency=1
+    # For standalone Compose (non-Swarm), you can set CPU limit like this:
+    cpus: "1.0"        # give each worker one CPU
+    # You can also cap memory if you like:
+    # mem_limit: "2g"
+
+volumes:
+  redis-data:

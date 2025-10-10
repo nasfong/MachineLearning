@@ -3,7 +3,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from pymongo.errors import ServerSelectionTimeoutError
 from db import get_client
 from products import router as products_router
-from video_transcoder import router as video_router, init_minio_buckets
+from video_transcoder import router as video_router, init_minio_buckets, init_celery
 
 app = FastAPI(title="Products API with MongoDB")
 
@@ -31,9 +31,12 @@ async def startup_event():
     try:
         await init_minio_buckets()
         print("✅ Minio connection s3.")
-    except ServerSelectionTimeoutError as e:
+    except Exception as e:
         print("❌ Minio connection failed:", e)
         raise e
+    
+    # Initialize Celery connection
+    init_celery()
 
 @app.get("/health")
 async def health_check():

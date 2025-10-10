@@ -1,4 +1,4 @@
-from fastapi import APIRouter, UploadFile, File, HTTPException, BackgroundTasks, Body
+from fastapi import APIRouter, UploadFile, File, HTTPException, Body
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 from typing import Literal, Optional
@@ -11,6 +11,22 @@ from pathlib import Path
 import logging
 
 logger = logging.getLogger(__name__)
+
+# Check if Celery is available
+CELERY_AVAILABLE = False
+transcode_video_task = None
+
+def init_celery():
+    """Initialize Celery connection"""
+    global CELERY_AVAILABLE, transcode_video_task
+    try:
+        from celery_worker import transcode_video_task as _task
+        transcode_video_task = _task
+        CELERY_AVAILABLE = True
+        logger.info("✅ Celery worker connection established")
+    except ImportError as e:
+        CELERY_AVAILABLE = False
+        logger.warning(f"⚠️ Celery not available: {e}")
 
 
 class TranscodeRequest(BaseModel):
@@ -76,149 +92,8 @@ async def init_minio_buckets():
         raise
 
 
-async def transcode_video_task(input_name: str, output_name: str, resolution: str, format: str = "mp4"):
-    """Background task to transcode video using FFmpeg"""
-    try:
-        # Download from MinIO
-        input_path = f"/tmp/{input_name}"
-        
-        minio_client.fget_object(INPUT_BUCKET, input_name, input_path)
-        logger.info(f"Downloaded {input_name} for transcoding")
-        
-        # Build FFmpeg command based on format
-        if format == "hls":
-            # HLS output - creates .m3u8 playlist and .ts segments
-            output_path = f"/tmp/{Path(output_name).stem}.m3u8"
-            cmd = [
-                "ffmpeg", "-i", input_path,
-                "-vf", f"scale={resolution}",
-                "-c:v", "libx264",
-                "-preset", "medium",
-                "-crf", "23",
-                "-c:a", "aac",
-                "-b:a", "128k",
-                "-hls_time", "10",
-                "-hls_playlist_type", "vod",
-                "-hls_segment_filename", f"/tmp/{Path(output_name).stem}_%03d.ts",
-                "-y",
-                output_path
-            ]
-        elif format == "dash":
-            # DASH output - creates .mpd manifest and .m4s segments
-            output_path = f"/tmp/{Path(output_name).stem}.mpd"
-            cmd = [
-                "ffmpeg", "-i", input_path,
-                "-vf", f"scale={resolution}",
-                "-c:v", "libx264",
-                "-preset", "medium",
-                "-crf", "23",
-                "-c:a", "aac",
-                "-b:a", "128k",
-                "-f", "dash",
-                "-seg_duration", "10",
-                "-use_template", "1",
-                "-use_timeline", "1",
-                "-init_seg_name", f"{Path(output_name).stem}_init_$RepresentationID$.m4s",
-                "-media_seg_name", f"{Path(output_name).stem}_chunk_$RepresentationID$_$Number$.m4s",
-                "-y",
-                output_path
-            ]
-        else:
-            # MP4 output (default)
-            output_path = f"/tmp/{output_name}"
-            cmd = [
-                "ffmpeg", "-i", input_path,
-                "-vf", f"scale={resolution}",
-                "-c:v", "libx264",
-                "-preset", "medium",
-                "-crf", "23",
-                "-c:a", "aac",
-                "-b:a", "128k",
-                "-movflags", "+faststart",
-                "-y",
-                output_path
-            ]
-        
-        logger.info(f"Starting transcoding: {input_name} -> {output_name} (format: {format})")
-        process = subprocess.run(cmd, check=True, capture_output=True)
-        
-        # Upload transcoded video with retry logic
-        max_retries = 3
-        
-        if format in ["hls", "dash"]:
-            # For HLS/DASH, upload all generated files
-            output_dir = Path(output_path).parent
-            pattern = f"{Path(output_name).stem}*"
-            files_to_upload = list(output_dir.glob(pattern))
-            
-            logger.info(f"Uploading {len(files_to_upload)} files for {format.upper()} format")
-            
-            for file_path in files_to_upload:
-                for attempt in range(max_retries):
-                    try:
-                        content_type = "application/vnd.apple.mpegurl" if file_path.suffix == ".m3u8" else \
-                                     "application/dash+xml" if file_path.suffix == ".mpd" else \
-                                     "video/mp2t" if file_path.suffix == ".ts" else \
-                                     "application/octet-stream"
-                        
-                        minio_client.fput_object(
-                            OUTPUT_BUCKET,
-                            file_path.name,
-                            str(file_path),
-                            content_type=content_type
-                        )
-                        logger.info(f"Uploaded: {file_path.name}")
-                        break
-                    except S3Error as e:
-                        if attempt < max_retries - 1:
-                            logger.warning(f"Upload attempt {attempt + 1} failed for {file_path.name}, retrying: {e}")
-                            continue
-                        else:
-                            logger.error(f"Upload failed after {max_retries} attempts for {file_path.name}")
-                            raise
-            
-            # Cleanup all generated files
-            for file_path in files_to_upload:
-                if file_path.exists():
-                    os.remove(file_path)
-        else:
-            # For MP4, upload single file
-            for attempt in range(max_retries):
-                try:
-                    minio_client.fput_object(
-                        OUTPUT_BUCKET,
-                        output_name,
-                        output_path,
-                        content_type="video/mp4"
-                    )
-                    logger.info(f"Transcoding complete: {output_name}")
-                    break
-                except S3Error as e:
-                    if attempt < max_retries - 1:
-                        logger.warning(f"Upload attempt {attempt + 1} failed, retrying: {e}")
-                        continue
-                    else:
-                        logger.error(f"Upload failed after {max_retries} attempts")
-                        raise
-            
-            # Cleanup
-            if os.path.exists(output_path):
-                os.remove(output_path)
-        
-        # Cleanup input file
-        os.remove(input_path)
-        
-    except subprocess.CalledProcessError as e:
-        logger.error(f"FFmpeg error: {e.stderr.decode() if e.stderr else str(e)}")
-        # Cleanup on error
-        if os.path.exists(input_path):
-            os.remove(input_path)
-        if os.path.exists(output_path):
-            os.remove(output_path)
-        raise
-    except Exception as e:
-        logger.error(f"Transcoding error: {e}")
-        raise
+# Note: The actual transcode_video_task is now in celery_worker.py
+# We removed the duplicate function from here to avoid naming conflicts
 
 
 @router.post("/upload")
@@ -260,10 +135,9 @@ async def upload_video(file: UploadFile = File(...)):
 @router.post("/transcode/{file_id}")
 async def transcode_video(
     file_id: str,
-    background_tasks: BackgroundTasks,
     request: TranscodeRequest = TranscodeRequest()
 ):
-    """Start video transcoding job with specified resolution and format"""
+    """Start video transcoding job with specified resolution and format (using Celery worker)"""
     try:
         input_name = None
         # Find the file with this ID
@@ -283,11 +157,16 @@ async def transcode_video(
         else:
             output_name = f"{file_id}_transcoded.mp4"
         
-        # Add transcoding to background tasks
-        background_tasks.add_task(transcode_video_task, input_name, output_name, request.resolution, request.format)
+        # Send task to Celery worker
+        if CELERY_AVAILABLE:
+            task = transcode_video_task.delay(input_name, output_name, request.resolution, request.format)
+            task_id = task.id
+        else:
+            raise HTTPException(status_code=503, detail="Worker service not available")
         
         return {
             "message": "Transcoding started",
+            "task_id": task_id,
             "file_id": file_id,
             "output_name": output_name,
             "resolution": request.resolution,
@@ -396,6 +275,53 @@ async def list_videos(bucket: str = OUTPUT_BUCKET):
         return {"bucket": bucket, "count": len(files), "files": files}
     except S3Error as e:
         raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get("/task/{task_id}")
+async def check_task_status(task_id: str):
+    """Check the status of a Celery transcoding task"""
+    if not CELERY_AVAILABLE:
+        raise HTTPException(status_code=503, detail="Worker service not available")
+    
+    from celery.result import AsyncResult
+    from celery_worker import celery_app
+    
+    task = AsyncResult(task_id, app=celery_app)
+    
+    if task.state == 'PENDING':
+        response = {
+            'task_id': task_id,
+            'state': task.state,
+            'status': 'Task is waiting to be processed'
+        }
+    elif task.state == 'PROGRESS':
+        response = {
+            'task_id': task_id,
+            'state': task.state,
+            'status': task.info.get('status', ''),
+        }
+    elif task.state == 'SUCCESS':
+        response = {
+            'task_id': task_id,
+            'state': task.state,
+            'status': 'completed',
+            'result': task.result
+        }
+    elif task.state == 'FAILURE':
+        response = {
+            'task_id': task_id,
+            'state': task.state,
+            'status': 'failed',
+            'error': str(task.info)
+        }
+    else:
+        response = {
+            'task_id': task_id,
+            'state': task.state,
+            'status': str(task.info)
+        }
+    
+    return response
 
 
 @router.get("/status/{file_id}")

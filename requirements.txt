@@ -7,3 +7,7 @@ python-dotenv>=1.0,<2
 # Video transcoding dependencies
 minio>=7.2,<8
 python-multipart>=0.0.6,<1
+
+# Celery for background tasks
+celery[redis]>=5.3,<6
+redis>=5.0,<6
